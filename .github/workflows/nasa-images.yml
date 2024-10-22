@@ -1,0 +1,96 @@
+name: NASA Images Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  download_images:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        date: []
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up jq for JSON parsing
+        run: sudo apt-get install jq
+
+      - name: Load NASA API Key
+        id: nasa_api_key
+        run: echo "API_KEY=${{ secrets.NASA_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Load Dates from JSON and set matrix
+        id: set_matrix
+        run: |
+          # Leer fechas desde data.json
+          DATES=$(jq -r '.dates[]' data.json)
+          echo "DATES=$DATES"
+
+          # Crear un JSON con las fechas para usar en la matriz
+          MATRIX="{\"date\": [$(
+              for date in $DATES; do
+                echo "\"$date\","
+              done | sed '$ s/,$//'
+          )]}"
+
+          # Exportar el JSON como salida del trabajo
+          echo "$MATRIX" > matrix.json
+        outputs:
+          matrix: ${{ steps.set_matrix.outputs.matrix }}
+
+      - name: Set matrix strategy dynamically
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const matrix = JSON.parse(fs.readFileSync('matrix.json', 'utf-8'));
+            return matrix;
+
+      - name: Fetch and Cache Image for Date ${{ matrix.date }}
+        run: |
+          CACHE_DIR="cache"
+          IMAGE_DIR="images"
+          DATE=${{ matrix.date }}
+
+          # Crear directorios si no existen
+          mkdir -p $CACHE_DIR
+          mkdir -p $IMAGE_DIR
+
+          CACHE_FILE="$CACHE_DIR/$DATE.json"
+          IMAGE_FILE="$IMAGE_DIR/img-$DATE.jpg"
+
+          # Revisar si el cache existe, de lo contrario, realizar petición al API
+          if [ -f "$CACHE_FILE" ]; then
+            echo "Usando cache para la fecha $DATE."
+            URL=$(jq -r '.url' "$CACHE_FILE")
+          else
+            echo "Cache no encontrado, haciendo la petición para la fecha $DATE."
+            RESPONSE=$(curl -s "https://api.nasa.gov/planetary/apod?api_key=${{ secrets.NASA_API_KEY }}&date=$DATE")
+
+            # Guardar la respuesta en cache
+            echo "$RESPONSE" > "$CACHE_FILE"
+
+            # Obtener la URL de la imagen
+            URL=$(echo "$RESPONSE" | jq -r '.url')
+          fi
+
+          # Verificar si la URL es válida antes de descargar la imagen
+          if [[ "$URL" != "null" ]]; then
+            echo "Descargando imagen para la fecha $DATE."
+            curl -s "$URL" --output "$IMAGE_FILE"
+          else
+            echo "No se encontró imagen para la fecha $DATE."
+          fi
+
+      - name: Upload images as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: "img-${{ matrix.date }}"
+          path: images/img-${{ matrix.date }}.jpg
+          retention-days: 1
